@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diana-voice"
+version = "0.1.0"
+description = "Local voice bridge for Codex"
+requires-python = ">=3.11,<3.14"
+dependencies = []
+
+[project.optional-dependencies]
+# First candidate version. Validate its installed API before wiring the pipeline.
+voice = ["pipecat-ai[webrtc,runner,silero,whisper,piper]==1.7.0",
+         "torch==2.8.0", "torchaudio==2.8.0",
+         "soundfile>=0.13,<0.14", "soxr>=1,<2"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+
+[project.scripts]
+diana-probe = "diana.probe:main"
+
+[tool.setuptools.packages.find]
+include = ["diana*"]
