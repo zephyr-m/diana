@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light"><title>Диана · Голосовой пульт</title>
+  <link rel="icon" href="data:,"><link rel="stylesheet" href="/console/style.css">
+</head>
+<body>
+  <header>
+    <a class="brand" href="/"><span class="brand-icon">д</span><span>диана<small>личный голосовой пульт</small></span></a>
+    <div class="header-controls"><span id="connection" class="connection">Не подключена</span><span id="voice-label" class="subtle">Ирина · локально</span><button id="settings-open" class="icon-button" title="Настройки" aria-label="Настройки">⚙</button><button id="connect" class="primary">Подключить</button></div>
+  </header>
+  <main>
+    <section class="conversation" aria-label="Разговор">
+      <div class="section-heading"><div><h1>Разговор</h1><p>Голосом или текстом. В твоём темпе.</p></div><span id="thread" class="mono subtle" title="Отдельный диалог Codex">Новый сеанс</span></div>
+      <div id="messages" class="messages" role="log" aria-live="polite">
+        <div id="empty" class="empty"><div class="orb">д</div><h2>Я здесь, когда понадоблюсь</h2><p>Подключи микрофон и скажи что-нибудь.<br>Справа будет видно, что происходит с репликой.</p><div class="privacy-note">Проверка голоса и Whisper — на ноутбуке.<br>Codex получает текст запроса. Озвучка Piper — локально.</div></div>
+      </div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <button id="audio-unlock" hidden>Разрешить звук</button>
+      <footer class="composer"><div class="composer-controls"><span id="listen-state"><i class="dot"></i> Микрофон отключён</span><div><button id="mute" disabled>Выключить микрофон</button><button id="stop" disabled>■ Остановить ответ</button></div></div><form id="text-form"><textarea id="text-input" rows="1" maxlength="4000" placeholder="Написать вместо голоса…" aria-label="Сообщение Диане" disabled></textarea><button id="send" class="send" disabled aria-label="Отправить">↑</button></form><div class="composer-hint">Enter — отправить · Shift + Enter — новая строка</div></footer>
+    </section>
+    <aside>
+      <section class="card current"><div class="eyebrow">СЕЙЧАС <span id="stage-time" class="mono"></span></div><h2 id="stage">Готова к подключению</h2><p id="stage-reason">Начни разговор кнопкой вверху.</p><div class="mic-row"><span>Микрофон</span><meter id="meter" min="-80" max="0" value="-80" aria-label="Уровень микрофона"></meter><span id="db" class="mono">—</span></div><p id="verification-status" class="caption">Проверка выключена · принимается любая речь</p><div class="identity"><span id="identity">Голос ещё не проверен</span><span id="score" class="mono">—</span></div></section>
+      <section class="card"><div class="eyebrow">ПОСЛЕДНЯЯ РЕПЛИКА <span id="trace-id" class="mono">—</span></div><div class="total"><span>До отправки звука</span><strong id="total">—</strong></div><p class="caption">От последнего обнаруженного участка речи до первого аудио в выходном тракте. Не включает задержку динамиков.</p><div id="metrics"></div><button id="details-open" class="text-button" disabled>Причины и временная шкала ↗</button></section>
+      <section class="card quiet"><div class="eyebrow">КАК УСТРОЕН РАЗГОВОР</div><div class="route"><span>Твой голос</span><span>WeSpeaker → Whisper</span><span>Codex → <b id="route-voice">Piper</b></span><span>Ответ в динамиках</span></div><p class="caption">Распознавание владельца вероятностное. Сходство — не процент уверенности.</p><a href="/client/" target="_blank" rel="noopener">Техническая страница Pipecat ↗</a><p class="caption">Перед её подключением отключи этот пульт.</p></section>
+    </aside>
+  </main>
+  <dialog id="details"><div class="dialog-heading"><div><div class="eyebrow">ТРАССИРОВКА</div><h2 id="detail-title">Реплика</h2></div><button data-close="details" class="icon-button" aria-label="Закрыть">✕</button></div><div id="detail-content"></div><button id="export" class="secondary">Скачать диагностику этой реплики</button><p class="caption">Файл содержит текст реплики и ответа. Аудио не сохраняется.</p></dialog>
+  <dialog id="settings"><div class="dialog-heading"><h2>Твой пульт</h2><button data-close="settings" class="icon-button" aria-label="Закрыть">✕</button></div><label>Микрофон<select id="mic-select"><option value="">Подключись, чтобы выбрать устройство</option></select></label><label>Динамики<select id="speaker-select"><option value="">Системное устройство</option></select></label><p id="speaker-help" class="caption"></p><hr><label><input id="verify-owner" type="checkbox" disabled> Проверять мой голос</label><p class="caption">Изменение применяется к следующей обрабатываемой реплике. При новом подключении проверка снова выключена.</p><hr><h3>Текущая конфигурация</h3><dl><dt>Озвучка</dt><dd id="settings-voice">Piper · Ирина</dd><dt>Whisper</dt><dd>small · CPU · русский</dd><dt>Порог владельца</dt><dd>0.35 · предварительный</dd><dt>Завершение фразы</dt><dd>0.8 с после состояния речи VAD</dd><dt>История</dt><dd>В отдельном диалоге Codex</dd></dl><p class="caption">Параметры модели пока меняются на сервере. Устройство микрофона можно выбрать здесь.</p></dialog>
+  <audio id="audio" autoplay></audio>
+  <script type="module" src="/console/dist/app.js"></script>
+</body>
+</html>

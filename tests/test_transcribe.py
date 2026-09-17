@@ -55,6 +55,22 @@ class GateTests(unittest.TestCase):
         self.assertEqual(gate.recognize(self.phrase(2))[0], "rejected")
         whisper.transcribe.assert_not_called()
 
+    def test_disabled_verification_skips_encoder_and_accepts_short_speech(self):
+        gate, whisper = self.setup_gate([])
+        metrics = {}
+        result, score, text = gate.recognize(self.phrase(0.5), metrics, verify_owner=False)
+        self.assertEqual((result, score, text), ("accepted", None, "Тестовая фраза."))
+        gate.encoder.encode.assert_not_called()
+        self.assertNotIn("verify", metrics)
+        whisper.transcribe.assert_called_once()
+
+    def test_reenabled_verification_rejects_foreign_voice(self):
+        gate, whisper = self.setup_gate([0.12])
+        gate.recognize(self.phrase(2), verify_owner=False)
+        whisper.reset_mock()
+        self.assertEqual(gate.recognize(self.phrase(2), verify_owner=True)[0], "rejected")
+        whisper.transcribe.assert_not_called()
+
     def test_change_of_speaker_blocks_whole_phrase(self):
         gate, whisper = self.setup_gate([0.65, 0.61, 0.10])
         self.assertEqual(gate.recognize(self.phrase(4))[0], "rejected")

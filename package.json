@@ -1,0 +1,23 @@
+{
+  "name": "diana",
+  "version": "1.0.0",
+  "description": "Голосовая оболочка Codex на базе готовых компонентов Pipecat.",
+  "scripts": {
+    "build": "esbuild web/app.js --bundle --format=esm --minify --outfile=web/dist/app.js",
+    "test:ui": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zephyr-m/diana.git"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "@pipecat-ai/client-js": "^1.13.1",
+    "@pipecat-ai/small-webrtc-transport": "^1.10.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "esbuild": "^0.28.2"
+  },
+  "private": true
+}

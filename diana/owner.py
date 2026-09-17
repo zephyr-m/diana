@@ -139,26 +139,56 @@ async def bot(runner_args):
                                               spoken_status="completed")))
 
         diagnostic.reporter = show_status
+        async def telemetry(data):
+            await worker.rtvi.send_server_message(data)
+        if mode in ("transcribe", "chat"):
+            diagnostic.telemetry = telemetry
         if mode == "chat":
             from .conversation import Conversation, VoiceDialogue, load_voice
-            conversation = Conversation()
+            conversation = Conversation(state=runner_args.cli_args.conversation_state)
             voice = await asyncio.to_thread(load_voice)
             await conversation.start()
-            dialogue = VoiceDialogue(conversation, voice, show_status, diagnostic.push_frame)
+            dialogue = VoiceDialogue(conversation, voice, show_status, diagnostic.push_frame,
+                                     tts_backend=runner_args.cli_args.tts)
         if mode in ("transcribe", "chat"):
-            async def show_transcript(text):
+            async def show_transcript(text, trace=None):
                 from datetime import datetime, timezone
                 await worker.rtvi.push_transport_message(RTVI.UserTranscriptionMessage(
                     data=RTVI.UserTranscriptionMessageData(
                         text=text, user_id="owner", timestamp=datetime.now(timezone.utc).isoformat(), final=True)))
                 if dialogue:
-                    await dialogue.submit(text)
+                    await dialogue.submit(text, trace)
             diagnostic.transcript_reporter = show_transcript
+
+        @worker.rtvi.event_handler("on_client_message")
+        async def client_message(rtvi, message):
+            if message.type == "diana.verify" and mode in ("chat", "transcribe"):
+                enabled = message.data.get("enabled") if isinstance(message.data, dict) else None
+                if isinstance(enabled, bool):
+                    diagnostic.verify_owner = enabled
+                    await telemetry({"kind": "verification", "enabled": enabled})
+                return
+            if not dialogue:
+                return
+            if message.type == "diana.stop":
+                await dialogue.stop()
+            elif message.type == "diana.text":
+                text = message.data.get("text", "") if isinstance(message.data, dict) else ""
+                if isinstance(text, str) and 0 < len(text.strip()) <= 4000:
+                    from .telemetry import Trace
+                    trace = Trace(telemetry, source="keyboard")
+                    await trace.update("recognized", "Введено с клавиатуры; проверка голоса не применяется", text=text.strip())
+                    await show_transcript(text.strip(), trace)
         client_ready = asyncio.Event()
 
         @worker.rtvi.event_handler("on_client_ready")
         async def ready(rtvi):
             client_ready.set()
+            if mode in ("chat", "transcribe"):
+                await telemetry({"kind": "verification", "enabled": diagnostic.verify_owner})
+                await show_status("Проверка владельца выключена: принимается любая речь. Переключатель — в настройках пульта.")
+            await telemetry({"kind": "session", "mode": mode, "voice": runner_args.cli_args.tts,
+                             "thread": conversation.thread_id if conversation else None})
             welcome = (
                 "Регистрация голоса. Говори обычным голосом — нужно собрать шесть фрагментов речи."
                 if mode == "enroll" else
@@ -170,9 +200,11 @@ async def bot(runner_args):
                            "После проверки твоего голоса здесь появится текст. "
                            "Порог 0.35 предварительный. В Codex текст пока не отправляется.")
             elif mode == "chat":
+                voice_name = "Светлана (Microsoft, онлайн)" if runner_args.cli_args.tts == "edge" else "Ирина (Piper, локально)"
                 welcome = ("Диана готова к разговору. Скажи фразу и сделай паузу — "
                            "я отвечу голосом. Контекст разговора сохраняется. "
-                           "Новая подтверждённая реплика прерывает предыдущий ответ.")
+                           "Новая подтверждённая реплика прерывает предыдущий ответ. "
+                           f"Голос: {voice_name}.")
             await diagnostic.report(welcome)
 
         async def watch_audio():
@@ -202,7 +234,12 @@ async def bot(runner_args):
 
 
 if __name__ == "__main__":
-    from pipecat.runner.run import main
+    from pipecat.runner.run import main, app
+    from .web import install
+    install(app)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["enroll", "verify", "transcribe", "chat"], required=True)
+    parser.add_argument("--tts", choices=["edge", "piper"], default="piper")
+    from pathlib import Path
+    parser.add_argument("--conversation-state", type=Path, help="Файл ID отдельного диалога (например, для проверки интерфейса)")
     main(parser)

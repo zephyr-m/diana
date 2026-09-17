@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import os
 import re
+import time
 
 from .codex import CodexClient, CodexError
 from .models import ROOT, MODEL_DIR, VOICE
@@ -44,10 +45,20 @@ class Conversation:
             raise
 
     async def reply(self, text):
-        result = await self.client.request("turn/start", {
+        start = asyncio.create_task(self.client.request("turn/start", {
             "threadId": self.thread_id,
             "input": [{"type": "text", "text": text, "text_elements": []}],
-        })
+        }))
+        try:
+            result = await asyncio.shield(start)
+        except asyncio.CancelledError:
+            # Stop may arrive before the server returns the turn ID. Resolve
+            # that acknowledgement so the remote turn is not left running.
+            with contextlib.suppress(Exception):
+                result = await start
+                await self.client.request("turn/interrupt", {
+                    "threadId": self.thread_id, "turnId": result["turn"]["id"]})
+            raise
         self.turn_id = result["turn"]["id"]
         answers = []
         completed = False
@@ -83,45 +94,65 @@ class Conversation:
 
 class VoiceDialogue:
     """Keep ASR free while a reply runs. A new verified phrase replaces it."""
-    def __init__(self, conversation, voice, report, send_frame):
+    def __init__(self, conversation, voice, report, send_frame, tts_backend="piper"):
         self.conversation, self.voice = conversation, voice
         self.report, self.send_frame = report, send_frame
         self.task = None
-        # Cancellation of to_thread does not stop inference: serialize Piper.
-        import threading
-        self.voice_lock = threading.Lock()
+        self.trace = None
+        from .tts import SpeechSynthesizer
+        self.speech = SpeechSynthesizer(voice, tts_backend, report)
 
-    async def submit(self, text):
+    async def stop(self):
         from pipecat.frames.frames import InterruptionFrame
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
         await self.send_frame(InterruptionFrame())
-        self.task = asyncio.create_task(self._answer(text))
 
-    def synthesize(self, text):
-        with self.voice_lock:
-            return [(c.audio_int16_bytes, c.sample_rate, c.sample_channels)
-                    for c in self.voice.synthesize(text)]
+    async def submit(self, text, trace=None):
+        await self.stop()
+        self.trace = trace
+        self.task = asyncio.create_task(self._answer(text, trace))
 
-    async def _answer(self, text):
+    async def _answer(self, text, trace=None):
         from pipecat.frames.frames import OutputAudioRawFrame
         from loguru import logger
         try:
+            if trace:
+                await trace.update("codex", "Текст отправлен в отдельный диалог Codex", thread=self.conversation.thread_id)
+            started = time.monotonic()
             await self.report("Диана думает…")
             answer = await self.conversation.reply(text)
+            if trace:
+                trace.duration("codex", started)
+                await trace.update("tts", "Ответ получен; готовлю первое предложение", answer=answer)
             await self.report(answer)
+            first = True
             # Generate and send sentence-sized chunks; no WAVs on disk.
             for sentence in re.split(r"(?<=[.!?])\s+", answer):
-                for pcm, rate, channels in await asyncio.to_thread(self.synthesize, sentence):
+                started = time.monotonic()
+                for pcm, rate, channels in await self.speech.synthesize(sentence):
+                    if trace and first:
+                        trace.duration("tts", started)
+                        trace.duration("to_audio", trace.ended)
+                        await trace.update("speaking", "Первое аудио передано в выходной тракт WebRTC",
+                                           voice=self.speech.last_backend, fallback=self.speech.fallback_reason,
+                                           retry_seconds=max(0, round(self.speech.retry_after - time.monotonic())))
+                    first = False
                     size = int(rate * channels * 2 * 0.02)
                     for offset in range(0, len(pcm), size):
                         await self.send_frame(OutputAudioRawFrame(
                             audio=pcm[offset:offset + size], sample_rate=rate, num_channels=channels))
                         await asyncio.sleep(0.02)
+            if trace:
+                await trace.update("done", "Ответ полностью передан в WebRTC; буфер браузера может ещё звучать")
         except asyncio.CancelledError:
+            if trace:
+                await trace.update("interrupted", "Ответ остановлен новой репликой, кнопкой Стоп или отключением")
             raise
         except Exception:
+            if trace:
+                await trace.update("error", "Ошибка получения или озвучки ответа; подробности в терминале")
             logger.exception("Ошибка голосового ответа")
             await self.report("Не удалось получить или озвучить ответ. Попробуй ещё раз.")
 

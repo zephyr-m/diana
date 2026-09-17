@@ -11,6 +11,7 @@ from pipecat.processors.frame_processor import FrameProcessor
 import time
 
 from .models import MODEL_DIR
+from .telemetry import Trace
 
 THRESHOLD = 0.35  # Provisional, based on the owner's initial small calibration set.
 RATE_BYTES = 32000
@@ -73,24 +74,33 @@ class OwnerGate:
         self.encoder, self.reference, self.whisper = encoder, reference, whisper
         self.threshold = threshold
 
-    def recognize(self, utterance):
+    def recognize(self, utterance, metrics=None, progress=None, verify_owner=True):
+        metrics = metrics if metrics is not None else {}
+        started = time.monotonic()
         voice = np.frombuffer(utterance.voiced, dtype="<i2").astype(np.float32) / 32768
-        if len(voice) < 16000:
-            return "short", None, ""
-        # Check overlapping windows, including the tail: an accepted beginning
-        # must not automatically admit a later, different speaker.
-        width = min(32000, len(voice))
-        starts = list(range(0, len(voice) - width + 1, 16000))
-        if starts[-1] != len(voice) - width:
-            starts.append(len(voice) - width)
-        scores = [float(self.encoder.encode(voice[i:i + width]) @ self.reference) for i in starts]
-        score = min(scores)
-        if not np.isfinite(scores).all() or score < self.threshold:
-            return "rejected", score, ""
+        score = None
+        if verify_owner:
+            if len(voice) < 16000:
+                return "short", None, ""
+            # Check overlapping windows, including the tail: an accepted beginning
+            # must not automatically admit a later, different speaker.
+            width = min(32000, len(voice))
+            starts = list(range(0, len(voice) - width + 1, 16000))
+            if starts[-1] != len(voice) - width:
+                starts.append(len(voice) - width)
+            scores = [float(self.encoder.encode(voice[i:i + width]) @ self.reference) for i in starts]
+            metrics["verify"] = round((time.monotonic() - started) * 1000, 1)
+            score = min(scores)
+            if not np.isfinite(scores).all() or score < self.threshold:
+                return "rejected", score, ""
+        if progress:
+            progress(score)
         audio = np.frombuffer(utterance.audio, dtype="<i2").astype(np.float32) / 32768
+        started = time.monotonic()
         segments, _ = self.whisper.transcribe(audio, language="ru", beam_size=1,
                                              condition_on_previous_text=False)
         text = " ".join(s.text.strip() for s in segments).strip()
+        metrics["whisper"] = round((time.monotonic() - started) * 1000, 1)
         return "accepted" if text else "empty", score, text
 
 
@@ -108,6 +118,11 @@ class OwnerTranscriber(FrameProcessor):
         self.last_audio = None
         self.complete = False
         self.was_speaking = False
+        self.verify_owner = False
+        self.telemetry = None
+        self.trace = None
+        self.last_voiced = None
+        self.last_meter = 0
 
     async def report(self, text):
         logger.info(text)
@@ -127,22 +142,54 @@ class OwnerTranscriber(FrameProcessor):
             await self.report("Микрофон подключён. Скажи фразу и сделай небольшую паузу.")
         state = await self.vad.analyze_audio(frame.audio)
         speaking = state == VADState.SPEAKING
+        if self.telemetry and self.last_audio - self.last_meter > 0.15:
+            samples = np.frombuffer(frame.audio, dtype="<i2").astype(np.float32) / 32768
+            db = 20 * np.log10(max(float(np.sqrt(np.mean(samples * samples))), 1e-6))
+            await self.telemetry({"kind": "meter", "db": round(float(db), 1), "speaking": speaking})
+            self.last_meter = self.last_audio
         if speaking and not self.was_speaking and not self.buffer.audio and not self.buffer.discarding:
+            self.trace = Trace(self.telemetry)
+            await self.trace.update("listening", "Микрофон: обнаружена речь")
             await self.report("Слушаю…")
+        if speaking:
+            self.last_voiced = self.last_audio
         self.was_speaking = speaking
         utterance = self.buffer.feed(frame.audio, speaking)
         if utterance is not None:
+            trace = self.trace or Trace(self.telemetry)
+            trace.ended = self.last_voiced or time.monotonic()
+            trace.duration("pause", trace.ended)
+            trace.data["queued_at"] = time.monotonic()
+            await trace.update("queued", "Реплика завершена; ожидает обработки", truncated=utterance.truncated)
+            self.trace = None
             try:
-                self.queue.put_nowait(utterance)
+                self.queue.put_nowait((utterance, trace))
             except asyncio.QueueFull:
+                await trace.update("rejected", "Очередь обработки заполнена")
                 await self.report("Не успеваю обработать речь. Эта реплика пропущена; подожди результат и повтори.")
 
     async def _consume(self):
         while True:
-            utterance = await self.queue.get()
+            utterance, trace = await self.queue.get()
             try:
-                await self.report("Проверяю голос и распознаю фразу…")
-                result, score, text = await asyncio.to_thread(self.gate.recognize, utterance)
+                trace.duration("queue", trace.data.pop("queued_at"))
+                verify_owner = self.verify_owner  # Snapshot: changes apply to the next processed phrase.
+                await trace.update("verify" if verify_owner else "whisper",
+                                   "Проверяю все окна голоса" if verify_owner else "Проверка голоса выключена; принимается любая речь",
+                                   verify_owner=verify_owner)
+                loop = asyncio.get_running_loop()
+                def progress(score):
+                    asyncio.run_coroutine_threadsafe(trace.update(
+                        "whisper", "Голос подтверждён; распознавание локальным Whisper" if verify_owner else "Whisper: без проверки владельца",
+                        score=score, threshold=self.gate.threshold), loop).result(timeout=5)
+                result, score, text = await asyncio.to_thread(self.gate.recognize, utterance, trace.data["metrics"], progress, verify_owner)
+                reasons = {"short": "Меньше секунды речи для проверки владельца", "rejected": "Голос не прошёл проверку; Whisper и Codex не вызваны",
+                           "empty": "Голос подтверждён, Whisper не разобрал слова", "accepted": "Все окна голоса прошли порог; текст распознан"}
+                if not verify_owner:
+                    reasons.update(accepted="Текст распознан без проверки владельца", empty="Whisper не разобрал слова; проверка владельца выключена")
+                await trace.update("recognized" if result == "accepted" else "rejected", reasons[result],
+                                   score=score if score is not None and np.isfinite(score) else None,
+                                   threshold=self.gate.threshold, text=text)
                 if utterance.truncated:
                     await self.report("Реплика длиннее 20 секунд: обработано начало. Остальное повтори после паузы.")
                 if result == "short":
@@ -150,13 +197,14 @@ class OwnerTranscriber(FrameProcessor):
                 elif result == "rejected":
                     await self.report(f"Голос не подтверждён ({score:.3f}, порог {THRESHOLD}). Реплика отклонена.")
                 elif result == "empty":
-                    await self.report("Голос подтверждён, но слова разобрать не удалось. Повтори фразу.")
+                    await self.report("Слова разобрать не удалось. Повтори фразу.")
                 elif self.transcript_reporter:
-                    await self.transcript_reporter(text)
-                    await self.report(f"Голос подтверждён ({score:.3f}). Текст распознан локально.")
+                    await self.transcript_reporter(text, trace)
+                    await self.report(f"Голос подтверждён ({score:.3f}). Текст распознан локально." if verify_owner else "Текст распознан без проверки голоса.")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                await trace.update("error", f"Ошибка обработки: {type(exc).__name__}")
                 logger.error("Ошибка распознавания: {}", type(exc).__name__)
                 await self.report("Ошибка обработки реплики. Повтори её; если ошибка повторится, сообщи об этом.")
             finally:

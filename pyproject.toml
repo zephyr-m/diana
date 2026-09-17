@@ -11,9 +11,14 @@ dependencies = []
 
 [project.optional-dependencies]
 # First candidate version. Validate its installed API before wiring the pipeline.
-voice = ["pipecat-ai[webrtc,runner,silero,whisper,piper]==1.7.0",
-         "torch==2.8.0", "torchaudio==2.8.0",
-         "soundfile>=0.13,<0.14", "soxr>=1,<2"]
+voice = [
+    "pipecat-ai[webrtc,runner,silero,whisper,piper]==1.7.0",
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "soundfile>=0.13,<0.14",
+    "soxr>=1,<2",
+    "edge-tts>=7.2,<8",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
